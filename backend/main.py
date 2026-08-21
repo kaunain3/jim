@@ -1,6 +1,11 @@
 from fastapi import FastAPI
+from db.engine import engine, Base
 
 app = FastAPI(title="JIM-Your personal PHD assistent")
+
+@app.on_event("startup")
+def on_startup():
+    Base.metadata.create_all(bind=engine)
 
 @app.get("/")
 def read_root():

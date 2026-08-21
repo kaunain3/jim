@@ -59,7 +59,7 @@ Jim/
 │   │   └── extractor.py    # PyMuPDF text + tables + images (+ optional unum-ocr)
 │   ├── db/
 │   │   ├── engine.py       # SQLite connection pool
-│   │   ├── models.py       # SQLAlchemy (or plain SQL) schemas
+│   │   ├── models.py       # SQLAlchemy ORM schemas
 │   │   └── migrations/     # Alembic or manual DDL
 │   └── workers/
 │       └── job_runner.py   # asyncio worker for ingest/search jobs
@@ -141,7 +141,7 @@ Run: `pytest tests/test_papers.py -v`
 Expected: FAIL — no model / session defined yet.
 
 **Step 3: Implement minimal models + migrations**
-Create `backend/db/models.py` with `papers`, `chunks`, `embeddings`, `graph_nodes`, `graph_edges`, `memories` tables. Use plain SQL for simplicity (no ORM bloat).
+Create `backend/db/models.py` with `papers`, `chunks`, `embeddings`, `graph_nodes`, `graph_edges`, `memories` tables using **SQLAlchemy ORM** (declarative base with relationships). Create `backend/db/migrations/001_initial.sql` with corresponding DDL statements for version-controlled schema management.
 
 **Step 4: Run test to verify pass**
 Run: `pytest tests/test_papers.py -v`
