@@ -32,6 +32,7 @@ class Section:
     order: int
     image_refs: list[str] = field(default_factory=list)
     table_refs: list[str] = field(default_factory=list)
+    needs_review: bool = False
 
 
 @dataclass
@@ -39,6 +40,7 @@ class ExtractionResult:
     sections: list[Section] = field(default_factory=list)
     images: list[ImageAsset] = field(default_factory=list)
     tables: list[TableAsset] = field(default_factory=list)
+    needs_review: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +52,7 @@ class ExtractionResult:
                     "order": section.order,
                     "image_refs": section.image_refs,
                     "table_refs": section.table_refs,
+                    "needs_review": section.needs_review,
                 }
                 for section in self.sections
             ],
@@ -69,7 +72,14 @@ class ExtractionResult:
                 }
                 for table in self.tables
             ],
+            "needs_review": self.needs_review,
         }
+
+
+@dataclass
+class _TriageResult:
+    has_text_layer: bool
+    is_multi_column: bool
 
 
 @dataclass
@@ -90,58 +100,264 @@ class PDFExtractor:
         """
         Extract structured content from a PDF.
 
-        Normal text extraction is attempted first. OCR is used only when
-        use_ocr=True and the PDF contains no usable text.
         """
         source_path = Path(pdf_path)
 
         if not source_path.is_file():
             raise FileNotFoundError(f"PDF not found: {source_path}")
 
-        # PyMuPDF 1.28 can deadlock when its layout-aware text extraction is
-        # invoked from asyncio.to_thread(). Keep the call synchronous here;
-        # Task 1.3 will move whole ingestion jobs to worker processes.
-        result = self._extract_sync(
-            source_path,
-            Path(output_root),
-        )
+        # Stage 0: Triage — cheap checks to decide extraction strategy
+        triage = self._triage(source_path)
 
-        if self._has_text(result) or not use_ocr:
-            return result
-
-        ocr_output = self._run_ocr(source_path)
-
-        if ocr_output is None:
-            return result
-
-        ocr_pdf_path = self._existing_file_path(ocr_output)
-
-        if ocr_pdf_path is not None and ocr_pdf_path.suffix.lower() == ".pdf":
-            return self._extract_sync(
-                ocr_pdf_path,
+        if triage.has_text_layer and triage.is_multi_column:
+            # Multi-column: need layout-aware ordering
+            result = self._extract_sync(
+                source_path,
                 Path(output_root),
+                multi_column=True,
             )
-
-        ocr_text = self._normalise_ocr_text(ocr_output)
-
-        if not ocr_text:
-            return result
-
-        return ExtractionResult(
-            sections=[
-                Section(
-                    heading=None,
-                    page=1,
-                    text=ocr_text,
-                    order=0,
+        elif triage.has_text_layer:
+            # Single-column: standard ordering
+            result = self._extract_sync(
+                source_path,
+                Path(output_root),
+                multi_column=False,
+            )
+        else:
+            # No text layer — route to OCR
+            if not use_ocr:
+                return ExtractionResult()
+            ocr_output = self._run_ocr(source_path)
+            if ocr_output is None:
+                return ExtractionResult()
+            ocr_pdf_path = self._existing_file_path(ocr_output)
+            if ocr_pdf_path is not None and ocr_pdf_path.suffix.lower() == ".pdf":
+                result = self._extract_sync(
+                    ocr_pdf_path,
+                    Path(output_root),
+                    multi_column=False,
                 )
-            ]
+            else:
+                ocr_text = self._normalise_ocr_text(ocr_output)
+                if not ocr_text:
+                    return ExtractionResult()
+                result = ExtractionResult(
+                    sections=[
+                        Section(
+                            heading=None,
+                            page=1,
+                            text=ocr_text,
+                            order=0,
+                        )
+                    ]
+                )
+
+        # Stage 4: Validation gate — sanity-check before persist
+        validated = self._validate_result(result)
+
+        return validated
+
+    # ------------------------------------------------------------------ #
+    # Stage 0: Triage
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _triage(pdf_path: Path) -> _TriageResult:
+        """
+        Cheap checks on pages 1-2 to decide extraction strategy.
+
+        Returns whether the PDF has a usable text layer and whether it is
+        multi-column. These determine downstream behavior.
+        """
+        try:
+            document = pymupdf.open(pdf_path)
+        except Exception:
+            return _TriageResult(has_text_layer=False, is_multi_column=False)
+
+        try:
+            # Check text layer on first 2 pages
+            sample_pages = list(document[:2])
+            total_text_length = 0
+            all_blocks: list[dict] = []
+
+            for page in sample_pages:
+                text = page.get_text()
+                total_text_length += len(text.strip())
+                page_dict = page.get_text("dict")
+                blocks = [
+                    b for b in page_dict.get("blocks", [])
+                    if b.get("type") == 0
+                ]
+                all_blocks.extend(blocks)
+
+            has_text_layer = total_text_length > 50
+
+            # Detect single vs multi-column by clustering x-coordinates
+            is_multi_column = False
+            if has_text_layer and all_blocks:
+                page_width = document[0].rect.width
+                mid_x = page_width / 2
+                left_count = sum(1 for b in all_blocks if b["bbox"][0] < mid_x)
+                right_count = sum(1 for b in all_blocks if b["bbox"][0] >= mid_x)
+                # If blocks fall into two distinct halves, it's multi-column
+                is_multi_column = left_count > 0 and right_count > 0
+
+            return _TriageResult(
+                has_text_layer=has_text_layer,
+                is_multi_column=is_multi_column,
+            )
+        finally:
+            document.close()
+
+    # ------------------------------------------------------------------ #
+    # Stage 1: Layout-correct reading order
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _order_blocks(
+        blocks: list[dict],
+        page_width: float,
+    ) -> list[dict]:
+        """
+        Sort blocks by column first, then top-to-bottom within each column.
+
+        For single-column documents, this is just top-to-bottom sort.
+        For multi-column documents, left column blocks come before right
+        column blocks, preserving vertical order within each column.
+        """
+        if not blocks:
+            return blocks
+
+        mid_x = page_width / 2
+        left = sorted(
+            [b for b in blocks if b["bbox"][0] < mid_x],
+            key=lambda b: b["bbox"][1],
         )
+        right = sorted(
+            [b for b in blocks if b["bbox"][0] >= mid_x],
+            key=lambda b: b["bbox"][1],
+        )
+
+        # Interleave left and right columns for proper reading order
+        result: list[dict] = []
+        li, ri = 0, 0
+        while li < len(left) and ri < len(right):
+            # Pick the block that appears higher on the page
+            if left[li]["bbox"][1] <= right[ri]["bbox"][1]:
+                result.append(left[li])
+                li += 1
+            else:
+                result.append(right[ri])
+                ri += 1
+
+        result.extend(left[li:])
+        result.extend(right[ri:])
+        return result
+
+    # ------------------------------------------------------------------ #
+    # Stage 2: Noise removal
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _remove_noise(
+        fragments: list[_TextFragment],
+    ) -> list[_TextFragment]:
+        """
+        Two cleanup passes:
+
+        1. De-hyphenation: join <word>-\n<lowercase word> → <word><word>
+        2. Header/footer/page-number stripping based on repetition across pages
+        """
+        # Pass 1: De-hyphenation
+        result: list[_TextFragment] = []
+        for fragment in fragments:
+            text = fragment.text
+            # Join hyphenated words: "informa-\ntion" → "information"
+            text = re.sub(r"([a-zA-Z])-(\n\s*)([a-z])", r"\1\3", text)
+            result.append(_TextFragment(
+                text=text,
+                font_size=fragment.font_size,
+                bold=fragment.bold,
+                bbox=fragment.bbox,
+            ))
+
+        # Pass 2: Strip repeating headers/footers/page numbers
+        # We do this by checking if a fragment's text appears at similar
+        # y-positions on multiple pages
+
+        # Pass 3: Strip figure captions and standalone page numbers
+        filtered: list[_TextFragment] = []
+        for fragment in result:
+            text = fragment.text.strip()
+            # Skip figure captions: "Figure 1: ...", "Fig. 2: ...",
+            # "Figure 3a: ...", etc.
+            if re.match(r'^Figure \d+[a-zA-Z]*:\s*', text, re.IGNORECASE):
+                continue
+            if re.match(r'^Fig\.\s+\d+[a-zA-Z]*:\s*', text, re.IGNORECASE):
+                continue
+            # Skip standalone page numbers (single digit or small number)
+            if re.fullmatch(r'\d+', text) and len(text) <= 3:
+                continue
+            filtered.append(fragment)
+
+        return filtered
+
+    @staticmethod
+    def _strip_headers_footers(
+        fragments: list[_TextFragment],
+    ) -> list[_TextFragment]:
+        """
+        Strip text that appears as running headers or footers.
+
+        A fragment is considered a header/footer if its text is short
+        and appears at a consistent vertical position relative to the
+        page height.
+        """
+        if not fragments:
+            return fragments
+
+        # Collect texts that appear near the top (headers) or bottom (footers)
+        # of pages across all fragments
+        top_texts: dict[str, int] = {}
+        bottom_texts: dict[str, int] = {}
+
+        for fragment in fragments:
+            if fragment.bbox is None:
+                continue
+            text = fragment.text.strip()
+            if not text or len(text) > 80:
+                continue
+
+            # Check if near top (header) or bottom (footer)
+            top_threshold = 100  # pixels from top
+            bottom_threshold = 100  # pixels from bottom
+
+            if fragment.bbox[1] < top_threshold:
+                top_texts[text] = top_texts.get(text, 0) + 1
+            elif fragment.bbox[3] > bottom_threshold:
+                bottom_texts[text] = bottom_texts.get(text, 0) + 1
+
+        # Filter out repeating header/footer text
+        filtered: list[_TextFragment] = []
+        for fragment in fragments:
+            text = fragment.text.strip()
+            is_header = text in top_texts and top_texts[text] > 1
+            is_footer = text in bottom_texts and bottom_texts[text] > 1
+            if is_header or is_footer:
+                continue
+            filtered.append(fragment)
+
+        return filtered
+
+    # ------------------------------------------------------------------ #
+    # Stage 3: Structural extraction (on clean input)
+    # ------------------------------------------------------------------ #
 
     def _extract_sync(
         self,
         pdf_path: Path,
         output_root: Path,
+        multi_column: bool = False,
     ) -> ExtractionResult:
         file_hash = self._sha256(pdf_path)
         asset_directory = output_root / file_hash
@@ -210,9 +426,54 @@ class PDFExtractor:
 
         try:
             for page_number, page in enumerate(document, start=1):
-                fragments = self._merge_numbered_headings(
-                    self._page_fragments(page)
-                )
+                # Stage 1: Get raw fragments
+                raw_fragments = self._page_fragments(page)
+
+                # Stage 1: Apply layout-correct ordering
+                page_width = page.rect.width
+                if multi_column:
+                    page_dict = page.get_text("dict")
+                    blocks = [
+                        b for b in page_dict.get("blocks", [])
+                        if b.get("type") == 0
+                    ]
+                    ordered_blocks = self._order_blocks(blocks, page_width)
+                    # Rebuild fragments from ordered blocks
+                    fragments: list[_TextFragment] = []
+                    for block in ordered_blocks:
+                        lines: list[str] = []
+                        font_sizes: list[float] = []
+                        is_bold = False
+                        for line in block.get("lines", []):
+                            line_text: list[str] = []
+                            for span in line.get("spans", []):
+                                text = span.get("text", "").strip()
+                                if not text:
+                                    continue
+                                line_text.append(text)
+                                font_sizes.append(float(span.get("size", 0)))
+                                font_name = str(span.get("font", "")).lower()
+                                flags = int(span.get("flags", 0))
+                                if "bold" in font_name or flags & 16:
+                                    is_bold = True
+                            if line_text:
+                                lines.append(" ".join(line_text))
+                        text = "\n".join(lines).strip()
+                        if text:
+                            fragments.append(_TextFragment(
+                                text=text,
+                                font_size=max(font_sizes, default=0),
+                                bold=is_bold,
+                                bbox=tuple(block.get("bbox", ())) or None,
+                            ))
+                else:
+                    fragments = raw_fragments
+
+                # Stage 2: Noise removal
+                fragments = self._remove_noise(fragments)
+                fragments = self._strip_headers_footers(fragments)
+
+                fragments = self._merge_numbered_headings(fragments)
                 body_font_size = self._body_font_size(fragments)
 
                 page_images = self._extract_images(
@@ -262,7 +523,11 @@ class PDFExtractor:
                         current_page = page_number
                         has_heading = True
                     else:
+                        # Skip figure captions in leading parts (they belong to
+                        # the previous section's images, not as text content)
                         if current_heading is None:
+                            if self._looks_like_figure_caption(fragment.text):
+                                continue
                             leading_parts.append(fragment.text)
                         else:
                             current_parts.append(fragment.text)
@@ -310,6 +575,65 @@ class PDFExtractor:
             images=images,
             tables=tables,
         )
+
+    # ------------------------------------------------------------------ #
+    # Stage 4: Validation gate
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _validate_result(result: ExtractionResult) -> ExtractionResult:
+        """
+        Sanity-check the extraction result and flag issues.
+
+        - Title non-empty and reasonable length
+        - Abstract found; if not, mark needs_review
+        - Section count > 0; zero sections on multi-page means failure
+        """
+        needs_review = False
+
+        # Check title (first section with heading, or first section)
+        title_section = None
+        abstract_found = False
+        section_count = len(result.sections)
+
+        for section in result.sections:
+            if section.heading is not None:
+                if title_section is None:
+                    title_section = section
+                if section.heading.lower() == "abstract":
+                    abstract_found = True
+                    break
+
+        # Validate title
+        if title_section is None and section_count > 0:
+            # No headings found — might be unstructured
+            needs_review = True
+        elif title_section is not None:
+            title_text = title_section.text.strip()
+            if len(title_text) > 400:
+                # Suspiciously long "title" — column splitting may have failed
+                needs_review = True
+        elif section_count == 0:
+            needs_review = True
+
+        # Check abstract
+        if not abstract_found and section_count > 1:
+            needs_review = True
+
+        # Zero sections on multi-page paper
+        if section_count == 0:
+            needs_review = True
+
+        # Mark sections that need review
+        for section in result.sections:
+            section.needs_review = needs_review
+
+        result.needs_review = needs_review
+        return result
+
+    # ------------------------------------------------------------------ #
+    # Existing methods (preserved)
+    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _page_fragments(page: pymupdf.Page) -> list[_TextFragment]:
@@ -492,6 +816,17 @@ class PDFExtractor:
         ):
             return True
 
+        return False
+
+    @staticmethod
+    def _looks_like_figure_caption(text: str) -> bool:
+        """Check if text looks like a figure caption."""
+        stripped = text.strip()
+        # Match "Figure 1: ...", "Fig. 2: ...", "Figure 3a: ..."
+        if re.match(r'^Figure \d+[a-zA-Z]*:\s*', stripped, re.IGNORECASE):
+            return True
+        if re.match(r'^Fig\.\s+\d+[a-zA-Z]*:\s*', stripped, re.IGNORECASE):
+            return True
         return False
 
     @staticmethod
