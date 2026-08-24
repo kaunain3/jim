@@ -16,5 +16,5 @@ __pycache__
 *.log
 PI.md
 sample.pdf
-sample2.pdf
 fixtures
+test_ingestion.py
