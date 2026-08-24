@@ -4,7 +4,7 @@ from services.extractor import extractor
 
 
 async def main():
-    pdfs = ["sample.pdf", "sample2.pdf"]
+    pdfs = ["sample1.pdf", "sample2.pdf", "sample3.pdf", "sample4.pdf", "sample5.pdf","sample6.pdf", "sample7.pdf", "sample8.pdf", "sample9.pdf", "sample10.pdf","sample11.pdf", "sample12.pdf", "sample13.pdf", "sample14.pdf", "sample15.pdf","sample16.pdf", "sample17.pdf", "sample18.pdf", "sample19.pdf", "sample20.pdf","sample21.pdf", "sample22.pdf", "sample23.pdf", "sample24.pdf", "sample25.pdf"]
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import pymupdf
 import pytest
@@ -149,6 +150,61 @@ def test_heading_cleanup_and_artifact_filtering() -> None:
         _TextFragment(") V\n(1)", font_size=16, bold=True),
         body_font_size=10,
     )
+    assert not PDFExtractor._is_heading(
+        _TextFragment(
+            "24.67 Action-JND (Ours)",
+            font_size=7.4,
+            bold=False,
+        ),
+        body_font_size=8,
+    )
+    assert not PDFExtractor._is_heading(
+        _TextFragment(
+            "1 imposes no X-measurability on the weight functions",
+            font_size=10,
+            bold=False,
+        ),
+        body_font_size=10,
+    )
+
+
+def test_wrapped_appendix_heading_is_one_fragment() -> None:
+    block = {
+        "type": 0,
+        "bbox": (70, 100, 500, 140),
+        "lines": [
+            {
+                "bbox": (70, 100, 300, 112),
+                "spans": [
+                    {
+                        "text": "A.1 Stability and Ablations on the",
+                        "size": 11,
+                        "font": "Bold",
+                        "flags": 16,
+                        "bbox": (70, 100, 300, 112),
+                    }
+                ],
+            },
+            {
+                "bbox": (70, 114, 300, 126),
+                "spans": [
+                    {
+                        "text": "Answerability-Boundary Target",
+                        "size": 11,
+                        "font": "Bold",
+                        "flags": 16,
+                        "bbox": (70, 114, 300, 126),
+                    }
+                ],
+            },
+        ],
+    }
+
+    fragments = PDFExtractor._fragments_from_blocks([block])
+
+    assert [fragment.text for fragment in fragments] == [
+        "A.1 Stability and Ablations on the Answerability-Boundary Target"
+    ]
 
 
 @pytest.mark.asyncio
@@ -198,6 +254,39 @@ def test_triage_scan_only() -> None:
     scan_path = Path("tests/fixtures/scan_only.pdf")
     triage = PDFExtractor._triage(scan_path)
     assert triage.has_text_layer is False
+
+
+def test_page_level_column_detection() -> None:
+    """Author grids and equations must not force later pages into columns."""
+    sample_document = pymupdf.open(
+        Path(__file__).parents[1] / "sample1.pdf"
+    )
+    sample_page = sample_document[4]
+    sample_blocks = [
+        block
+        for block in sample_page.get_text("dict").get("blocks", [])
+        if block.get("type") == 0
+    ]
+    assert PDFExtractor._is_multi_column_page(
+        sample_blocks,
+        sample_page.rect.width,
+        sample_page.rect.height,
+    ) is False
+    sample_document.close()
+
+    two_column_document = pymupdf.open("tests/fixtures/two_column.pdf")
+    two_column_page = two_column_document[1]
+    two_column_blocks = [
+        block
+        for block in two_column_page.get_text("dict").get("blocks", [])
+        if block.get("type") == 0
+    ]
+    assert PDFExtractor._is_multi_column_page(
+        two_column_blocks,
+        two_column_page.rect.width,
+        two_column_page.rect.height,
+    ) is True
+    two_column_document.close()
 
 
 # ------------------------------------------------------------------ #
@@ -264,6 +353,53 @@ def test_de_hyphenation_no_change() -> None:
     ]
     result = PDFExtractor._remove_noise(fragments)
     assert result[0].text == "Hello world"
+
+
+def test_noise_removal_strips_control_characters() -> None:
+    fragments = [
+        _TextFragment(text="normal\x00 text\x1f", font_size=10, bold=False),
+    ]
+
+    result = PDFExtractor._remove_noise(fragments)
+
+    assert "\x00" not in result[0].text
+    assert "\x1f" not in result[0].text
+
+
+def test_first_page_title_merge_excludes_author_metadata() -> None:
+    fragments = [
+        _TextFragment(
+            text="A Long Research Paper Title", font_size=12, bold=True,
+            bbox=(70, 90, 500, 102),
+        ),
+        _TextFragment(
+            text="Continues Across Two Lines", font_size=12, bold=True,
+            bbox=(100, 105, 480, 117),
+        ),
+        _TextFragment(
+            text="Ada Lovelace and Grace Hopper", font_size=12, bold=False,
+            bbox=(90, 135, 490, 147),
+        ),
+    ]
+
+    merged = PDFExtractor._merge_first_page_title(fragments)
+
+    assert merged[0].text == (
+        "A Long Research Paper Title Continues Across Two Lines"
+    )
+    assert any(fragment.text.startswith("Ada Lovelace") for fragment in merged)
+
+
+def test_table_like_rows_are_not_section_headings() -> None:
+    fragments = [
+        _TextFragment("Metric", 10, True, (70, 100, 120, 112)),
+        _TextFragment("Planar", 10, True, (200, 100, 250, 112)),
+        _TextFragment("Thick Absorber", 10, True, (330, 100, 430, 112)),
+    ]
+
+    table_like_ids = PDFExtractor._table_like_fragment_ids(fragments)
+
+    assert {id(fragment) for fragment in fragments} <= table_like_ids
 
 
 # ------------------------------------------------------------------ #
@@ -405,3 +541,102 @@ async def test_extraction_result_to_dict() -> None:
     assert d["images"][0]["token"] == "<img_0>"
     assert d["tables"][0]["markdown"] == "| a | b |"
     assert d["needs_review"] is False
+
+
+# ------------------------------------------------------------------ #
+# Real-document regression coverage
+# ------------------------------------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_sample_pdf_structural_regression(tmp_path: Path) -> None:
+    """The real sample paper must not regress into false tables or ordering noise."""
+    sample_path = Path(__file__).parents[1] / "sample1.pdf"
+    result = await extractor.extract(
+        sample_path,
+        use_ocr=False,
+        output_root=tmp_path / "library",
+    )
+
+    headings = [section.heading for section in result.sections]
+    assert len(headings) == 24
+    assert headings[:4] == [
+        "Attention Is All You Need",
+        "Abstract",
+        "1 Introduction",
+        "2 Background",
+    ]
+    assert headings[-2:] == ["7 Conclusion", "References"]
+
+    assert len(result.tables) == 3
+    assert len({table.token for table in result.tables}) == 3
+    assert all(table.markdown.startswith("Table ") or table.markdown.startswith("|")
+               for table in result.tables)
+    assert all("Google Brain noam" not in table.markdown for table in result.tables)
+
+
+@pytest.mark.asyncio
+async def test_sample2_structural_regression(tmp_path: Path) -> None:
+    """The second paper keeps its appendices, figures, and unlabeled tables."""
+    sample_path = Path(__file__).parents[1] / "sample2.pdf"
+    result = await extractor.extract(
+        sample_path,
+        use_ocr=False,
+        output_root=tmp_path / "library",
+    )
+
+    headings = [section.heading for section in result.sections]
+    # The improved structural pass intentionally removes three body/table
+    # fragments that the old exact-count regression treated as headings.
+    assert len(headings) >= 40
+    assert headings[:4] == [
+        "THE EXCEEDANCE DESIGN EFFECT : EFFECTIVE SAMPLE SIZE FOR THRESHOLDS UNDER CLUSTERING",
+        "Abstract",
+        "1 The guarantee is a statement about ranks",
+        "1.1 What the guarantee actually says",
+    ]
+    assert "Appendix A: The selection channel in detail" in headings
+    assert "Appendix B: Proofs, remarks and derivations deferred from §2" in headings
+    assert headings[-1] == "References"
+
+    # Plot labels and equation fragments must not become headings or tables.
+    assert not any(heading and heading.startswith("2 m {") for heading in headings)
+    assert not any(heading in {"R", "P", "1.0 exceedance"} for heading in headings)
+
+    assert len(result.images) >= 5
+    assert {4, 6, 8, 15, 19}.issubset(
+        {image.page for image in result.images}
+    )
+    assert len(result.tables) >= 7
+    assert {10, 12, 13, 17, 22, 30, 43}.issubset(
+        {table.page for table in result.tables}
+    )
+    assert len({table.token for table in result.tables}) == len(result.tables)
+    assert any("verify_indicator_icc.py" in table.markdown for table in result.tables)
+    assert result.needs_review is False
+
+
+@pytest.mark.asyncio
+async def test_sample7_table_and_figure_regression(tmp_path: Path) -> None:
+    """A table followed by a vector figure must not leak labels as headings."""
+    sample_path = Path(__file__).parents[1] / "sample7.pdf"
+    result = await extractor.extract(
+        sample_path,
+        use_ocr=False,
+        output_root=tmp_path / "library",
+    )
+
+    headings = [section.heading for section in result.sections if section.heading]
+    assert headings[-3:] == [
+        "V. EXPERIMENTS",
+        "VI. CONCLUSION",
+        "REFERENCES",
+    ]
+    assert not any(
+        heading and re.match(r"^\d+\.\d{2}\s+", heading)
+        for heading in headings
+    )
+    page_twelve_tables = [table for table in result.tables if table.page == 12]
+    assert page_twelve_tables
+    assert max(len(table.markdown) for table in page_twelve_tables) < 5000
+    assert result.needs_review is False
