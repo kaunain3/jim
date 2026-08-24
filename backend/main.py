@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from db.engine import engine, Base
+from db import models
 
 app = FastAPI(title="JIM-Your personal PHD assistent")
 
