@@ -7,9 +7,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from db.engine import Base
-from db.models import ChunksModel, EmbeddingsModel
+from db.models import ChunksModel, EmbeddingsModel, PapersModel
 from services.embedding import EmbeddingService
-from services.extractor import PDFExtractor
+from services.extractor import ExtractionResult, PDFExtractor, Section
 from services.ingest import ingest_paper
 
 
@@ -43,6 +43,16 @@ class _FakeEmbedder(EmbeddingService):
 
     def embed(self, texts):
         return [[float(len(text)), 1.0] for text in texts]
+
+
+class _ShortEmbedder(_FakeEmbedder):
+    def embed(self, texts):
+        return super().embed(texts[:1])
+
+
+class _FailingEmbedder(_FakeEmbedder):
+    def embed(self, texts):
+        raise RuntimeError("embedding failed")
 
 
 @pytest.mark.asyncio
@@ -85,3 +95,63 @@ async def test_ingest_paper_missing_file_raises(db_session, tmp_path):
         await ingest_paper(
             db_session, tmp_path / "missing.pdf", PDFExtractor(), embedder=_FakeEmbedder()
         )
+
+
+@pytest.mark.asyncio
+async def test_ingest_rejects_empty_extraction_without_creating_paper(
+    db_session, sample_pdf
+):
+    with pytest.raises(ValueError, match="No extractable text"):
+        await ingest_paper(
+            db_session,
+            sample_pdf,
+            PDFExtractor(),
+            embedder=_FakeEmbedder(),
+            extraction_result=ExtractionResult(),
+        )
+
+    assert db_session.query(PapersModel).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_rejects_embedding_count_mismatch_and_rolls_back(
+    db_session, sample_pdf
+):
+    result = ExtractionResult(
+        sections=[
+            Section("Introduction", 1, "First chunk", 0),
+            Section("Methods", 1, "Second chunk", 1),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="Embedding count mismatch"):
+        await ingest_paper(
+            db_session,
+            sample_pdf,
+            PDFExtractor(),
+            embedder=_ShortEmbedder(),
+            extraction_result=result,
+        )
+
+    assert db_session.query(PapersModel).count() == 0
+    assert db_session.query(ChunksModel).count() == 0
+    assert db_session.query(EmbeddingsModel).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_rolls_back_when_embedding_fails(db_session, sample_pdf):
+    result = ExtractionResult(
+        sections=[Section("Introduction", 1, "A valid chunk", 0)]
+    )
+
+    with pytest.raises(RuntimeError, match="embedding failed"):
+        await ingest_paper(
+            db_session,
+            sample_pdf,
+            PDFExtractor(),
+            embedder=_FailingEmbedder(),
+            extraction_result=result,
+        )
+
+    assert db_session.query(PapersModel).count() == 0
+    assert db_session.query(ChunksModel).count() == 0

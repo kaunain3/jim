@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from collections import Counter
@@ -101,6 +102,23 @@ class _TextFragment:
 
 class PDFExtractor:
     async def extract(
+        self,
+        pdf_path: str | Path,
+        use_ocr: bool = False,
+        output_root: str | Path = "data/library",
+    ) -> ExtractionResult:
+        """Extract structured content from a PDF.
+
+        Async entry point: the extraction itself is CPU-bound PyMuPDF work,
+        so it runs in a worker thread via :func:`asyncio.to_thread`. This
+        keeps the event loop free so SSE streams and other requests stay
+        responsive while a large paper is being ingested.
+        """
+        return await asyncio.to_thread(
+            self.extract_sync, pdf_path, use_ocr, output_root
+        )
+
+    def extract_sync(
         self,
         pdf_path: str | Path,
         use_ocr: bool = False,

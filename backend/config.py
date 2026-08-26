@@ -15,10 +15,12 @@ class Settings(BaseSettings):
     # (e.g. "llama3.1") — it won't accept a generic placeholder.
     llm_model: str = "local-model"
     library_dir: Path = Path("data/library")
+    data_dir: Path = Path("data")
 
     class Config:
         env_prefix = "JIM_"
 
 
 settings = Settings()
+settings.data_dir.mkdir(parents=True, exist_ok=True)
 settings.library_dir.mkdir(parents=True, exist_ok=True)

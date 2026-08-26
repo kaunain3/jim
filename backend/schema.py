@@ -58,3 +58,13 @@ class IngestArxivRequest(BaseModel):
     abstract: str | None = None
     year: int | None = None
     pdf_url: str
+
+
+class JobOut(BaseModel):
+    id: str
+    status: str
+    progress: float = 0.0
+    error: str | None = None
+    result: dict | None = None
+    created_at: datetime | None = None
+    completed_at: datetime | None = None

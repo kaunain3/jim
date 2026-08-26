@@ -6,6 +6,21 @@ from sqlalchemy.orm import relationship
 from db.engine import Base
 
 
+class JobsModel(Base):
+    __tablename__ = "jobs"
+
+    id = Column(String, primary_key=True)
+    job_type = Column(String, nullable=False, index=True)
+    kwargs_json = Column(Text, nullable=False, default="{}")
+    status = Column(String, nullable=False, index=True, default="pending")
+    progress = Column(Float, nullable=False, default=0.0)
+    error = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=True)
+    last_event_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    completed_at = Column(DateTime, nullable=True)
+
+
 class PapersModel(Base):
     __tablename__ = "papers"
 
