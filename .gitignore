@@ -18,5 +18,5 @@ PI.md
 sample.pdf
 fixtures
 test_ingestion.py
-Jim_db.db
+backend/Jim_db.db
 data/
