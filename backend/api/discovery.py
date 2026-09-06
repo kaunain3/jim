@@ -1,3 +1,4 @@
+
 """Topic -> candidate papers -> user picks -> ingest.
 
 Two-step by design: GET /discover just returns candidates (nothing is
@@ -7,11 +8,14 @@ same dedup/embedding behavior as a manual upload.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone 
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from config import settings
 from db.engine import get_db
+from db.models import PapersModel
 from schema import DiscoveredPaperOut, IngestArxivRequest, PaperOut
 from services.discovery import ArxivClient, download_pdf
 from services.extractor import PDFExtractor
@@ -20,6 +24,18 @@ from services.ingest import ingest_paper
 router = APIRouter(prefix="/discover", tags=["discovery"])
 _arxiv_client = ArxivClient()
 _extractor = PDFExtractor()
+
+@router.get("/recent", response_model=list[PaperOut])
+def recent_discoveries(days: int = 7, db: Session = Depends(get_db)):
+    """Papers in your library that originated from arXiv, added in the last N days."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    return (
+        db.query(PapersModel)
+        .filter(PapersModel.arxiv_id.isnot(None))
+        .filter(PapersModel.created_at >= cutoff)
+        .order_by(PapersModel.created_at.desc())
+        .all()
+    )
 
 
 @router.get("", response_model=list[DiscoveredPaperOut])
