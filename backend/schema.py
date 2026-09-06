@@ -68,3 +68,14 @@ class JobOut(BaseModel):
     result: dict | None = None
     created_at: datetime | None = None
     completed_at: datetime | None = None
+
+class StatsOut(BaseModel):
+    total_papers: int
+    total_ingested: int
+    recent_additions: int
+    active_sessions: int = 0
+
+
+class SearchResultOut(BaseModel):
+    paper: PaperOut
+    score: float
