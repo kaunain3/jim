@@ -20,9 +20,9 @@ fixtures
 test_ingestion.py
 backend/Jim_db.db
 data/
-node_modules/
-dist/
+frontend/node_modules/
+frontend/dist/
 .env
 .env.local
 *.log
-.vite/
+frontend/.vite/
