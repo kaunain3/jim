@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom fade-in animation */
+@layer utilities {
+  .transition-fade-in {
+    transition-property: opacity;
+  }
+}
+
+/* Focus visible styling */
+@layer base {
+  *:focus-visible {
+    @apply outline-none ring-2 ring-primary ring-offset-2;
+  }
+}
