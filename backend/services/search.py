@@ -1,10 +1,7 @@
 """Semantic search over ingested paper chunks.
 
-v1 approach: pull every (embedding, chunk) row — optionally scoped to one
-paper — and rank by cosine similarity in Python. That's plenty fast for a
-personal library (hundreds to low-thousands of chunks). If the library grows
-past that, swap this for a sqlite-vec virtual table without changing the
-public `semantic_search` signature.
+v1 approach: pull every (embedding, chunk) row, optionally scoped to one
+paper, and rank by cosine similarity in Python.
 """
 from __future__ import annotations
 
