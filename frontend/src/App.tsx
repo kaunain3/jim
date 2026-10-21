@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useState } from 'react';
+﻿import { ReactNode, useEffect, useState } from 'react';
 import { BrowserRouter as Router, Route, Routes, useLocation, Navigate } from 'react-router-dom';
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
@@ -9,6 +9,7 @@ import { SearchPage } from './pages/Search';
 import { QAPage } from './pages/QA';
 import { UploadPage } from './pages/Upload';
 import { SettingsPage } from './pages/Settings';
+import { RustTest } from './pages/RustTest';
 
 const sidebarItems = [
   { label: 'Dashboard', href: '/', icon: 'LayoutDashboard' as const },
@@ -17,6 +18,7 @@ const sidebarItems = [
   { label: 'Ask', href: '/qa', icon: 'MessageCircleQuestion' as const },
   { label: 'Upload', href: '/upload', icon: 'Upload' as const },
   { label: 'Settings', href: '/settings', icon: 'Settings' as const },
+  { label: 'Rust Test', href: '/rust-test', icon: 'Settings' as const },
 ];
 
 const AppRoutes = (): ReactNode => {
@@ -54,6 +56,7 @@ const AppRoutes = (): ReactNode => {
         <Route path="/qa" element={<QAPage />} />
         <Route path="/upload" element={<UploadPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/rust-test" element={<RustTest />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </div>
@@ -67,3 +70,4 @@ export const App = (): ReactNode => {
     </Router>
   );
 };
+
